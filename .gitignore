@@ -1,0 +1,12 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local / editor
+.matplotlib/
+.DS_Store
+
+# Trained models (often large; delete this line if you want them on GitHub)
+*.joblib
