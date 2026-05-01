@@ -1,16 +1,5 @@
-"""
-LA crime: predict which *crime type* fits a time + location (classification).
-
-We use sklearn LogisticRegression (from your course list). It assigns each row
-to one of several crime-type labels and gives probabilities with predict_proba.
-
-LinearRegression is for predicting a number (e.g. price), not a category, so we
-do not use it here.
-
-Feature engineering: lat/lon, LAPD area name, reporting district, premise
-description, weapon description, four 6-hour time buckets, day of week, month,
-year. Regularization: L2 via penalty and strength C on LogisticRegression.
-"""
+# LA crime: predict type from time/place (LogisticRegression on one-hot + scaled numbers).
+# Phishing script is separate: train_logistic_regression.py
 from __future__ import annotations
 
 import argparse
@@ -22,19 +11,28 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, f1_score
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
+# default CSV path (Kaggle download)
 DEFAULT_DATA = (
     Path.home()
     / ".cache/kagglehub/datasets/cityofLA/crime-in-los-angeles/versions/7"
     / "Crime_Data_2010_2017.csv"
 )
+
+NUM_COLS = ["lat", "lon", "dayofweek", "month", "year"]
+CAT_COLS = [
+    "area_name",
+    "reporting_district",
+    "premise_description",
+    "weapon_description",
+    "timeframe",
+]
 
 
 def parse_location(loc: pd.Series) -> tuple[pd.Series, pd.Series]:
@@ -51,7 +49,7 @@ def parse_location(loc: pd.Series) -> tuple[pd.Series, pd.Series]:
 
 
 def crime_type_bucket(description: str) -> str:
-    """Up to 8 categories; check more specific patterns first."""
+    # 8 text buckets for Crime Code Description (order matters: specific first)
     s = str(description).upper()
     if any(k in s for k in ("HOMICIDE", "MANSLAUGHTER", "MURDER")):
         return "Homicide"
@@ -73,9 +71,7 @@ def crime_type_bucket(description: str) -> str:
 
 
 def map_eight_to_coarse4(label8: str) -> str:
-    """
-    Broader 4-class target (often much easier to learn than 8 fine labels).
-    """
+    # merge 8 buckets into 4 labels
     s = str(label8)
     if s in ("Homicide", "Sexual assault", "Robbery", "Assault"):
         return "Violent"
@@ -86,7 +82,7 @@ def map_eight_to_coarse4(label8: str) -> str:
     return "Other"
 
 
-def _rare_top_keep(ser: pd.Series, top_n: int) -> set[str]:
+def _top_n_categories(ser: pd.Series, top_n: int) -> set[str]:
     if top_n <= 0 or len(ser) == 0:
         return set(ser.dropna().astype(str).unique())
     top = ser.value_counts().nlargest(top_n).index.astype(str)
@@ -100,11 +96,7 @@ def apply_rare_category_collapse(
     weapon_top_n: int,
     district_top_n: int,
 ) -> dict:
-    """
-    Map rare premise / weapon / district values to "Other" using the *train*
-    split only (keeps the mapping honest for the test set).
-    Returns a dict to save and reuse at prediction time.
-    """
+    # learn frequent categories on train, map the rest to "Other" (train+test)
     state: dict[str, set[str] | int] = {}
     cols: list[tuple[str, int, str]] = [
         ("premise_description", premise_top_n, "Other"),
@@ -114,7 +106,7 @@ def apply_rare_category_collapse(
     for col, n, other in cols:
         if n <= 0:
             continue
-        keep = _rare_top_keep(X_train[col], n)
+        keep = _top_n_categories(X_train[col], n)
         state[col] = keep
         for X in (X_train, X_test):
             X.loc[:, col] = X[col].where(X[col].astype(str).isin(keep), other)
@@ -132,32 +124,20 @@ def make_train_test_with_collapse(
     weapon_top_n: int,
     district_top_n: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, dict, str]:
-    """Load, split, apply rare-bucketing on train (then test)."""
-    df, y_name = load_and_prepare(
-        data_path, max_rows, top_k, target=target
-    )
+    df, y_name = load_and_prepare(data_path, max_rows, top_k, target=target)
     y = df[y_name]
     X = build_feature_frame(df)
     stratify = y if y.nunique() > 1 else None
     X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
-        test_size=test_size,
-        random_state=random_state,
-        stratify=stratify,
+        X, y, test_size=test_size, random_state=random_state, stratify=stratify
     )
     collapse = apply_rare_category_collapse(
-        X_train,
-        X_test,
-        premise_top_n,
-        weapon_top_n,
-        district_top_n,
+        X_train, X_test, premise_top_n, weapon_top_n, district_top_n
     )
     return X_train, X_test, y_train, y_test, collapse, y_name
 
 
 def apply_saved_collapse(row: dict, collapse: dict) -> None:
-    """In-place: map a single input row for prediction."""
     for col, keep in collapse.items():
         if not isinstance(keep, set) or col not in row:
             continue
@@ -167,7 +147,6 @@ def apply_saved_collapse(row: dict, collapse: dict) -> None:
 
 
 def timeframe_quarter(hour: pd.Series, minute: pd.Series) -> pd.Series:
-    """Four equal 6-hour windows in a day (minutes since midnight)."""
     h = hour.astype(int).clip(0, 23)
     m = minute.astype(int).clip(0, 59)
     mins = h * 60 + m
@@ -181,9 +160,8 @@ def timeframe_quarter(hour: pd.Series, minute: pd.Series) -> pd.Series:
     )
 
 
-def load_and_prepare(
-    path: Path, max_rows: int | None, top_k: int, target: str
-) -> tuple[pd.DataFrame, str]:
+def load_and_prepare(path, max_rows, top_k, target: str):
+    # read CSV, clean, build y=crime_type; target: coarse4 | eight | fine
     nrows = max_rows if max_rows else None
     df = pd.read_csv(path, nrows=nrows, low_memory=False)
     df.columns = df.columns.str.strip()
@@ -240,13 +218,13 @@ def load_and_prepare(
             df["Crime Code Description"].isin(top), "OTHER"
         )
     elif target == "coarse4":
-        df["__b8"] = df["Crime Code Description"].map(crime_type_bucket)
-        vcb = df["__b8"].value_counts()
+        df["_b8"] = df["Crime Code Description"].map(crime_type_bucket)
+        vcb = df["_b8"].value_counts()
         r8 = vcb[vcb < 5].index
         if len(r8):
-            df.loc[df["__b8"].isin(r8), "__b8"] = "Other"
-        df[target_col] = df["__b8"].map(map_eight_to_coarse4)
-        df = df.drop(columns=["__b8"])
+            df.loc[df["_b8"].isin(r8), "_b8"] = "Other"
+        df[target_col] = df["_b8"].map(map_eight_to_coarse4)
+        df = df.drop(columns=["_b8"])
     else:
         df[target_col] = df["Crime Code Description"].map(crime_type_bucket)
         vc = df[target_col].value_counts()
@@ -258,239 +236,51 @@ def load_and_prepare(
 
 
 def build_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
-    return df[
-        [
-            "lat",
-            "lon",
-            "area_name",
-            "reporting_district",
-            "premise_description",
-            "weapon_description",
-            "timeframe",
-            "dayofweek",
-            "month",
-            "year",
-        ]
-    ].copy()
+    return df[NUM_COLS + CAT_COLS].copy()
 
 
-def _one_hot() -> OneHotEncoder:
-    return OneHotEncoder(handle_unknown="ignore", sparse_output=True)
-
-
-def build_pipeline(
-    estimator: str,
-    random_state: int,
-    *,
-    logreg_C: float = 0.1,
-    rf_n_estimators: int = 300,
-    rf_max_depth: int | None = 24,
-    rf_min_samples_leaf: int = 1,
-    rf_max_features: str | float = 0.35,
-    hgb_max_iter: int = 200,
-    hgb_max_depth: int = 16,
-    hgb_learning_rate: float = 0.08,
-    hgb_l2: float = 0.0,
-) -> Pipeline:
-    num_cols = ["lat", "lon", "dayofweek", "month", "year"]
-    cat_cols = [
-        "area_name",
-        "reporting_district",
-        "premise_description",
-        "weapon_description",
-        "timeframe",
-    ]
-    if estimator == "logreg":
-        pre = ColumnTransformer(
-            [
-                ("num", StandardScaler(), num_cols),
-                ("cat", _one_hot(), cat_cols),
-            ],
-            remainder="drop",
-        )
-        clf = LogisticRegression(
-            max_iter=3000,
-            solver="saga",
-            penalty="l2",
-            C=float(logreg_C),
-            n_jobs=1,
-            tol=1e-3,
-        )
-    elif estimator == "rf":
-        pre = ColumnTransformer(
-            [
-                ("num", "passthrough", num_cols),
-                ("cat", _one_hot(), cat_cols),
-            ],
-            remainder="drop",
-        )
-        mdepth: int | None
-        if rf_max_depth is None:
-            mdepth = None
-        else:
-            mdepth = int(rf_max_depth)
-
-        clf = RandomForestClassifier(
-            n_estimators=int(rf_n_estimators),
-            max_depth=mdepth,
-            min_samples_leaf=int(rf_min_samples_leaf),
-            max_features=rf_max_features,
-            class_weight="balanced_subsample",
-            n_jobs=1,
-            random_state=random_state,
-        )
-    elif estimator == "hgb":
-        return build_hgb_pipeline(
-            random_state=random_state,
-            hgb_max_iter=hgb_max_iter,
-            hgb_max_depth=hgb_max_depth,
-            hgb_learning_rate=hgb_learning_rate,
-            hgb_l2=hgb_l2,
-        )
-    else:
-        raise ValueError("estimator must be 'logreg', 'rf', or 'hgb'")
-    return Pipeline([("pre", pre), ("clf", clf)])
-
-
-def build_hgb_pipeline(
-    random_state: int,
-    *,
-    hgb_max_iter: int = 200,
-    hgb_max_depth: int = 16,
-    hgb_learning_rate: float = 0.08,
-    hgb_l2: float = 0.0,
-) -> Pipeline:
-    """
-    Dense numeric + integer ordinal categories (native HistGBM support).
-    Avoids huge sparse one-hots, so it scales to large row counts.
-    """
-    num_cols = ["lat", "lon", "dayofweek", "month", "year"]
-    cat_cols = [
-        "area_name",
-        "reporting_district",
-        "premise_description",
-        "weapon_description",
-        "timeframe",
-    ]
-    n_num = len(num_cols)
-    cat_idx: list[int] = list(
-        range(n_num, n_num + len(cat_cols))
-    )  # indices in transformed matrix
-
-    OE = OrdinalEncoder(
-        handle_unknown="use_encoded_value",
-        unknown_value=-1,
-        max_categories=100,
-    )
-
+def build_logreg_pipeline(*, logreg_c: float, random_state: int) -> Pipeline:
+    # one Pipeline: scale nums + one-hot cats + logreg (same for train and predict)
     pre = ColumnTransformer(
         [
-            ("num", StandardScaler(), num_cols),
-            ("cat", OE, cat_cols),
+            ("num", StandardScaler(), NUM_COLS),
+            (
+                "cat",
+                OneHotEncoder(handle_unknown="ignore", sparse_output=True),
+                CAT_COLS,
+            ),
         ],
+        remainder="drop",
     )
-
-    clf = HistGradientBoostingClassifier(
-        max_iter=int(hgb_max_iter),
-        max_depth=int(hgb_max_depth),
-        learning_rate=float(hgb_learning_rate),
-        l2_regularization=float(hgb_l2),
+    clf = LogisticRegression(
+        max_iter=3000,
+        solver="saga",
+        penalty="l2",
+        C=float(logreg_c),
+        n_jobs=1,
+        tol=1e-3,
         random_state=random_state,
-        early_stopping=True,
-        validation_fraction=0.1,
-        n_iter_no_change=20,
-        categorical_features=cat_idx,  # after ColumnTransformer, num then cat
     )
     return Pipeline([("pre", pre), ("clf", clf)])
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(
-        description=(
-            "Train crime-type classifier from time + location: LogisticRegression, "
-            "RandomForest, or HistGradientBoosting (ordinal categories + native cat support)."
-        )
-    )
+def main():
+    # --- CLI args
+    p = argparse.ArgumentParser(description="Train LA crime LogisticRegression model")
     p.add_argument("--data", type=str, default=str(DEFAULT_DATA))
     p.add_argument("--max-rows", type=int, default=200_000)
     p.add_argument(
-        "--target",
-        type=str,
-        choices=("eight", "coarse4", "fine"),
-        default="eight",
-        help=(
-            "eight = 8 crime buckets (default); coarse4 = 4 coarse types (~easier); "
-            "fine = top-k LAPD labels + OTHER."
-        ),
+        "--target", choices=("coarse4", "eight", "fine"), default="coarse4"
     )
     p.add_argument("--top-k", type=int, default=15)
     p.add_argument("--test-size", type=float, default=0.2)
     p.add_argument("--random-state", type=int, default=42)
     p.add_argument("--model-out", type=str, default="la_crime_type_model.joblib")
+    p.add_argument("--premise-top-n", type=int, default=30)
+    p.add_argument("--weapon-top-n", type=int, default=25)
+    p.add_argument("--district-top-n", type=int, default=100)
     p.add_argument(
-        "--estimator",
-        type=str,
-        choices=("logreg", "rf", "hgb"),
-        default="logreg",
-        help="logreg | rf | hgb (HistGradientBoostingClassifier, dense + ordinal cats).",
-    )
-    p.add_argument(
-        "--premise-top-n",
-        type=int,
-        default=30,
-        help="Keep top-N premise labels on train; rest -> Other. 0 = no bucketing.",
-    )
-    p.add_argument(
-        "--weapon-top-n",
-        type=int,
-        default=25,
-        help="Keep top-N weapon labels on train; rest -> Other. 0 = no bucketing.",
-    )
-    p.add_argument(
-        "--district-top-n",
-        type=int,
-        default=100,
-        help="Keep top-N reporting districts on train; rest -> Other. 0 = no bucketing.",
-    )
-    p.add_argument(
-        "--logreg-C",
-        type=float,
-        default=0.1,
-        help="Inverse regularization strength for LogisticRegression (larger = less L2).",
-    )
-    p.add_argument(
-        "--rf-n-estimators",
-        type=int,
-        default=300,
-    )
-    p.add_argument(
-        "--rf-max-depth",
-        type=int,
-        default=24,
-        help="Max tree depth for RF. Use 0 for None (unlimited).",
-    )
-    p.add_argument(
-        "--rf-min-samples-leaf",
-        type=int,
-        default=1,
-    )
-    p.add_argument(
-        "--rf-max-features",
-        type=str,
-        default="0.35",
-        help='RF max_features, e.g. "sqrt" or 0.35',
-    )
-    p.add_argument(
-        "--hgb-max-iter", type=int, default=200, help="HistGradientBoosting max_iter."
-    )
-    p.add_argument(
-        "--hgb-max-depth", type=int, default=16, help="HistGradientBoosting max_depth."
-    )
-    p.add_argument(
-        "--hgb-lr", type=float, default=0.08, help="HistGradientBoosting learning_rate."
-    )
-    p.add_argument(
-        "--hgb-l2", type=float, default=0.0, help="HistGradientBoosting l2 regularization."
+        "--logreg-c", "--logreg-C", type=float, default=0.1, dest="logreg_c"
     )
     args = p.parse_args()
 
@@ -501,8 +291,9 @@ def main() -> None:
             "kagglehub.dataset_download('cityofLA/crime-in-los-angeles')"
         )
 
+    # --- load, split, bucket rare text fields (function lives above)
     max_rows = None if args.max_rows == 0 else args.max_rows
-    X_train, X_test, y_train, y_test, collapse_state, y_name = make_train_test_with_collapse(
+    X_train, X_test, y_train, y_test, collapse, y_name = make_train_test_with_collapse(
         data_path,
         max_rows,
         args.top_k,
@@ -513,67 +304,48 @@ def main() -> None:
         args.weapon_top_n,
         args.district_top_n,
     )
-    df_len = len(y_train) + len(y_test)
+    n = len(y_train) + len(y_test)
 
-    try:
-        rff = float(args.rf_max_features)
-    except ValueError:
-        rff = args.rf_max_features
-    rf_depth: int | None = None if args.rf_max_depth == 0 else int(args.rf_max_depth)
-
-    pipe = build_pipeline(
-        args.estimator,
-        args.random_state,
-        logreg_C=args.logreg_C,
-        rf_n_estimators=args.rf_n_estimators,
-        rf_max_depth=rf_depth,
-        rf_min_samples_leaf=args.rf_min_samples_leaf,
-        rf_max_features=rff,
-        hgb_max_iter=args.hgb_max_iter,
-        hgb_max_depth=args.hgb_max_depth,
-        hgb_learning_rate=args.hgb_lr,
-        hgb_l2=args.hgb_l2,
+    # --- model (StandardScaler + OneHotEncoder + LogisticRegression)
+    model = build_logreg_pipeline(
+        logreg_c=args.logreg_c, random_state=args.random_state
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", ConvergenceWarning)
-        pipe.fit(X_train, y_train)
+        model.fit(X_train, y_train)
 
-    y_pred = pipe.predict(X_test)
+    # --- test metrics
+    y_pred = model.predict(X_test)
     f1m = f1_score(y_test, y_pred, average="macro", zero_division=0)
     f1w = f1_score(y_test, y_pred, average="weighted", zero_division=0)
-    acc = (y_pred == y_test).mean()
+    acc = float((y_pred == y_test).mean())
 
-    est_note = {
-        "logreg": "LogisticRegression + predict_proba",
-        "rf": "RandomForestClassifier + predict_proba",
-        "hgb": "HistGradientBoostingClassifier + predict_proba",
-    }[args.estimator]
-    print(f"\nModel: {args.estimator} ({est_note})")
-    print(f"Rows: {df_len} | Classes: {pd.concat([y_train, y_test]).nunique()}")
-    print(f"Test accuracy: {acc:.3f} | macro F1: {f1m:.3f} | weighted F1: {f1w:.3f}\n")
+    print("\n--- test set ---")
+    print(f"target={args.target}  rows={n}  n_classes={pd.concat([y_train, y_test]).nunique()}")
+    print(f"accuracy={acc:.3f}  macro_F1={f1m:.3f}  weighted_F1={f1w:.3f}\n")
     print(classification_report(y_test, y_pred, zero_division=0))
 
-    sample = X_test.iloc[:1]
-    proba = pipe.predict_proba(sample)[0]
-    classes = pipe.named_steps["clf"].classes_  # type: ignore[index]
-    print("Example: estimated probability for each crime type (one test row; values sum to 1):")
-    for i in np.argsort(proba)[::-1][: min(8, len(classes))]:
-        print(f"  {classes[i]}: {proba[i]:.4f}")
+    proba = model.predict_proba(X_test.iloc[:1])[0]
+    classes = model.named_steps["clf"].classes_  # type: ignore[union-attr]
+    k_show = min(8, len(classes))
+    print("example P(class) for one test row:")
+    for j in np.argsort(proba)[::-1][:k_show]:
+        print(f"  {classes[j]}: {proba[j]:.4f}")
 
+    # --- save
     joblib.dump(
         {
-            "pipeline": pipe,
-            "estimator": args.estimator,
+            "pipeline": model,
+            "estimator": "logreg",
             "target_mode": args.target,
             "label_column": y_name,
             "feature_columns": list(X_train.columns),
             "class_names": list(classes),
-            "rare_collapse": collapse_state,
-            "note": "Class probabilities: clf.predict_proba",
+            "rare_collapse": collapse,
         },
         args.model_out,
     )
-    print(f"\nSaved: {args.model_out}")
+    print(f"\nsaved: {args.model_out}\n")
 
 
 if __name__ == "__main__":

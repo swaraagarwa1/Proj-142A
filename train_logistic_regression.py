@@ -1,3 +1,5 @@
+# Phishing: TF-IDF on email body + LogisticRegression (separate from LA crime).
+
 import argparse
 from pathlib import Path
 
@@ -12,80 +14,55 @@ from sklearn.pipeline import Pipeline
 
 
 def build_pipeline() -> Pipeline:
-    # Realistic baseline: use only body text and constrain vocabulary.
-    # This avoids "shortcut" signals from sender/flags on this synthetic dataset.
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ("email_text_tfidf", TfidfVectorizer(max_features=2), "email_text"),
-        ]
+    # TF-IDF on email text only, small vocabulary for this demo dataset
+    pre = ColumnTransformer(
+        [("tfidf", TfidfVectorizer(max_features=2), "email_text")],
     )
-
-    model = LogisticRegression(max_iter=1000, solver="saga", C=0.2)
-
-    return Pipeline(
-        steps=[
-            ("preprocessor", preprocessor),
-            ("classifier", model),
-        ]
-    )
+    clf = LogisticRegression(max_iter=1000, solver="saga", C=0.2)
+    return Pipeline([("pre", pre), ("clf", clf)])
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Train logistic regression phishing email classifier."
-    )
-    parser.add_argument(
-        "--data",
-        type=str,
-        required=True,
-        help="Path to input dataset (.xlsx or .csv).",
-    )
-    parser.add_argument(
-        "--model-out",
-        type=str,
-        default="phishing_logreg_model.joblib",
-        help="Path to save trained model pipeline.",
-    )
-    args = parser.parse_args()
+def main():
+    p = argparse.ArgumentParser(description="phishing email: TF-IDF + logreg")
+    p.add_argument("--data", type=str, required=True)
+    p.add_argument("--model-out", type=str, default="phishing_logreg_model.joblib")
+    args = p.parse_args()
 
-    data_path = Path(args.data)
-    if not data_path.exists():
-        raise FileNotFoundError(f"Data file not found: {data_path}")
+    path = Path(args.data)
+    if not path.exists():
+        raise FileNotFoundError(path)
 
-    if data_path.suffix.lower() == ".xlsx":
-        df = pd.read_excel(data_path)
-    elif data_path.suffix.lower() == ".csv":
-        df = pd.read_csv(data_path)
+    # load data
+    if path.suffix.lower() == ".xlsx":
+        df = pd.read_excel(path)
+    elif path.suffix.lower() == ".csv":
+        df = pd.read_csv(path)
     else:
-        raise ValueError("Unsupported file type. Use .xlsx or .csv")
+        raise ValueError("use .csv or .xlsx")
+    for col in ("email_text", "label"):
+        if col not in df.columns:
+            raise ValueError(f"need column: {col}")
 
-    required_columns = [
-        "email_text",
-        "label",
-    ]
-    missing = [col for col in required_columns if col not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
-
+    # x and y
     X = df[["email_text"]]
     y = df["label"].astype(str).str.lower()
 
+    # 80/20 train test
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=4, stratify=y
     )
 
-    pipeline = build_pipeline()
-    pipeline.fit(X_train, y_train)
-
-    y_pred = pipeline.predict(X_test)
-
-    print("\nClassification Report:")
+    # model
+    pl = build_pipeline()
+    pl.fit(X_train, y_train)
+    y_pred = pl.predict(X_test)
+    print("\nclassification report:")
     print(classification_report(y_test, y_pred))
-    print("Confusion Matrix:")
+    print("confusion matrix:")
     print(confusion_matrix(y_test, y_pred))
 
-    joblib.dump(pipeline, args.model_out)
-    print(f"\nSaved model pipeline to: {args.model_out}")
+    joblib.dump(pl, args.model_out)
+    print(f"\nsaved: {args.model_out}")
 
 
 if __name__ == "__main__":
