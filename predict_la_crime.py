@@ -1,4 +1,4 @@
-# Load a .joblib from train_la_crime.py and print P(class) for one place/time.
+# Load a .joblib from train_la_crime.py (logreg or rf bundle) and print P(class) for one place/time.
 # Example: python predict_la_crime.py --lat 34.05 --lon -118.25 --area-name Central --date 03/15/2016 --time 2200
 
 import argparse

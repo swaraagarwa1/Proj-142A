@@ -8,5 +8,5 @@ __pycache__/
 .matplotlib/
 .DS_Store
 
-# Trained models (often large; delete this line if you want them on GitHub)
+# Trained models (large RF bundles exceed GitHub’s 100MB/file limit unless using Git LFS)
 *.joblib

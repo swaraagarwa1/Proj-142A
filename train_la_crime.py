@@ -1,5 +1,6 @@
-# LA crime: predict type from time/place (LogisticRegression on one-hot + scaled numbers).
-# Phishing script is separate: train_logistic_regression.py
+# LA crime: predict type from time/place — logreg or RF (--classifier) on one-hot + scaled numbers.
+# Compare LogReg / LDA / RandomForest: python compare_logreg_lda.py
+# Tune RF hyperparameters: python tune_rf_la_crime.py
 from __future__ import annotations
 
 import argparse
@@ -11,6 +12,8 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, f1_score
@@ -264,9 +267,55 @@ def build_logreg_pipeline(*, logreg_c: float, random_state: int) -> Pipeline:
     return Pipeline([("pre", pre), ("clf", clf)])
 
 
+def build_lda_pipeline() -> Pipeline:
+    # Linear Discriminant Analysis: sklearn needs dense X (dense one-hot here).
+    pre = ColumnTransformer(
+        [
+            ("num", StandardScaler(), NUM_COLS),
+            (
+                "cat",
+                OneHotEncoder(handle_unknown="ignore", sparse_output=False),
+                CAT_COLS,
+            ),
+        ],
+        remainder="drop",
+    )
+    clf = LinearDiscriminantAnalysis(solver="eigen", shrinkage="auto")
+    return Pipeline([("pre", pre), ("clf", clf)])
+
+
+def build_rf_pipeline(
+    *,
+    random_state: int,
+    n_estimators: int = 100,
+    max_depth: int | None = 20,
+) -> Pipeline:
+    # Dense one-hot (same as LDA); sklearn RandomForest expects dense X.
+    pre = ColumnTransformer(
+        [
+            ("num", StandardScaler(), NUM_COLS),
+            (
+                "cat",
+                OneHotEncoder(handle_unknown="ignore", sparse_output=False),
+                CAT_COLS,
+            ),
+        ],
+        remainder="drop",
+    )
+    clf = RandomForestClassifier(
+        n_estimators=int(n_estimators),
+        max_depth=max_depth,
+        random_state=random_state,
+        n_jobs=-1,
+    )
+    return Pipeline([("pre", pre), ("clf", clf)])
+
+
 def main():
     # --- CLI args
-    p = argparse.ArgumentParser(description="Train LA crime LogisticRegression model")
+    p = argparse.ArgumentParser(
+        description="Train LA crime classifier (logistic regression or random forest)."
+    )
     p.add_argument("--data", type=str, default=str(DEFAULT_DATA))
     p.add_argument("--max-rows", type=int, default=200_000)
     p.add_argument(
@@ -280,9 +329,30 @@ def main():
     p.add_argument("--weapon-top-n", type=int, default=25)
     p.add_argument("--district-top-n", type=int, default=100)
     p.add_argument(
+        "--classifier",
+        choices=("logreg", "rf"),
+        default="logreg",
+        help="rf uses tuned coarse4 defaults (300 trees, depth 32) unless overridden.",
+    )
+    p.add_argument(
         "--logreg-c", "--logreg-C", type=float, default=0.1, dest="logreg_c"
     )
+    p.add_argument(
+        "--rf-n-estimators",
+        type=int,
+        default=300,
+        help="RandomForest only; matches accuracy-CV default for coarse4.",
+    )
+    p.add_argument(
+        "--rf-max-depth",
+        type=int,
+        default=32,
+        help="RandomForest only; use 0 for None.",
+    )
     args = p.parse_args()
+
+    if args.classifier == "rf" and args.model_out == "la_crime_type_model.joblib":
+        args.model_out = f"la_crime_rf_{args.target}.joblib"
 
     data_path = Path(args.data)
     if not data_path.exists():
@@ -306,12 +376,21 @@ def main():
     )
     n = len(y_train) + len(y_test)
 
-    # --- model (StandardScaler + OneHotEncoder + LogisticRegression)
-    model = build_logreg_pipeline(
-        logreg_c=args.logreg_c, random_state=args.random_state
-    )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", ConvergenceWarning)
+    # --- model
+    if args.classifier == "logreg":
+        model = build_logreg_pipeline(
+            logreg_c=args.logreg_c, random_state=args.random_state
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ConvergenceWarning)
+            model.fit(X_train, y_train)
+    else:
+        rf_depth = None if args.rf_max_depth == 0 else args.rf_max_depth
+        model = build_rf_pipeline(
+            random_state=args.random_state,
+            n_estimators=args.rf_n_estimators,
+            max_depth=rf_depth,
+        )
         model.fit(X_train, y_train)
 
     # --- test metrics
@@ -336,7 +415,7 @@ def main():
     joblib.dump(
         {
             "pipeline": model,
-            "estimator": "logreg",
+            "estimator": args.classifier,
             "target_mode": args.target,
             "label_column": y_name,
             "feature_columns": list(X_train.columns),
