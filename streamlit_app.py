@@ -1,5 +1,6 @@
 # Run:  streamlit run streamlit_app.py
-# Train RF bundle (default UI):  python train_la_crime.py --classifier rf --target coarse4
+# Ship/deploy default: la_crime_type_model.joblib (logreg, tiny — fits GitHub).
+# Optional RF locally:  python train_la_crime.py --classifier rf --target coarse4
 
 import os
 from pathlib import Path
@@ -222,6 +223,14 @@ def load_model(path_str: str):
     return joblib.load(p), None
 
 
+def default_model_path() -> Path:
+    """Prefer RF if present locally; otherwise the small logreg bundle committed for cloud deploy."""
+    rf = Path("la_crime_rf_coarse4.joblib")
+    if rf.is_file():
+        return rf
+    return Path("la_crime_type_model.joblib")
+
+
 def main():
     st.set_page_config(
         page_title="LA Crime Type Predictor",
@@ -240,10 +249,12 @@ def main():
 
     st.title("LA crime type predictor")
     st.markdown(
-        "Predict **coarse crime category** (4 classes) from where and when an incident occurred "
-        "using a **random forest** trained with `train_la_crime.py --classifier rf` "
-        "(**300** trees, **max_depth 32**, tuned for accuracy on coarse labels). "
-        "The model does **not** use the crime’s text description as an input."
+        "Predict **coarse crime category** (4 classes) from where and when an incident occurred. "
+        "This app loads whatever **`.joblib`** you point to in the sidebar: by default it uses the "
+        "small **logistic regression** bundle (`la_crime_type_model.joblib`) included in the repo so "
+        "the site works on free hosting. For a heavier **random forest** model, train locally with "
+        "`train_la_crime.py --classifier rf --target coarse4` and set the path to "
+        "`la_crime_rf_coarse4.joblib`. The model does **not** use the crime’s text description as input."
     )
 
     # -------- sidebar --------
@@ -252,11 +263,11 @@ def main():
         if "_crime_csv_default" not in st.session_state:
             st.session_state._crime_csv_default = resolve_crime_csv_path(DEFAULT_DATA)
 
-        default = Path("la_crime_rf_coarse4.joblib")
+        default = default_model_path()
         model_path = st.text_input(
             "Path to `.joblib`",
             value=str(default.resolve() if default.exists() else default),
-            help="Default `la_crime_rf_coarse4.joblib` from `train_la_crime.py --classifier rf`.",
+            help="Defaults to RF if `la_crime_rf_coarse4.joblib` exists, else shipped `la_crime_type_model.joblib`.",
         )
         dropdown_csv = st.text_input(
             "Crime CSV (LAPD dropdowns)",
@@ -274,7 +285,8 @@ def main():
         if err:
             st.error(err)
             st.markdown(
-                "Train first:\n```\n"
+                "Add a `.joblib` next to the app (or train one). Examples:\n```\n"
+                "python train_la_crime.py --classifier logreg --target coarse4\n"
                 "python train_la_crime.py --classifier rf --target coarse4\n```"
             )
         else:

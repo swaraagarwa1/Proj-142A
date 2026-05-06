@@ -10,3 +10,5 @@ __pycache__/
 
 # Trained models (large RF bundles exceed GitHub’s 100MB/file limit unless using Git LFS)
 *.joblib
+# Tiny logistic-regression bundle ships with the repo for Streamlit Cloud / easy clone.
+!la_crime_type_model.joblib
