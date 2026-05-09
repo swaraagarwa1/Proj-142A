@@ -220,7 +220,15 @@ def load_model(path_str: str):
     p = Path(path_str)
     if not p.exists():
         return None, f"File not found: {p.resolve()}"
-    return joblib.load(p), None
+    try:
+        return joblib.load(p), None
+    except Exception as exc:
+        hint = (
+            "This usually means **scikit-learn on the server doesn’t match** the version used to save the `.joblib`. "
+            "The repo pins **scikit-learn==1.6.1** in `requirements.txt`. "
+            "If the build still fails, set Streamlit **Python 3.12** (Advanced settings), then redeploy."
+        )
+        return None, f"Could not load `{p.name}`: `{type(exc).__name__}: {exc}`\n\n{hint}"
 
 
 def default_model_path() -> Path:
